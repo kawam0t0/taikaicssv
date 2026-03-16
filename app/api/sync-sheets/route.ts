@@ -1,5 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server'
 
+export const config = {
+  api: {
+    bodyParser: {
+      sizeLimit: '50mb',
+    },
+  },
+}
+
+// Next.js App Router 用のサイズ上限設定
+export const maxDuration = 60
+
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID ?? '1Q4kJ1YBNRs3_ScblMpzxDHif60u79i9G3EoVb60pZaU'
 const SHEET_NAME = process.env.SHEET_NAME ?? '退会確認CSV'
 const SHEETS_API_BASE = 'https://sheets.googleapis.com/v4/spreadsheets'
