@@ -1,19 +1,35 @@
 import { NextRequest, NextResponse } from 'next/server'
 
-export const config = {
-  api: {
-    bodyParser: {
-      sizeLimit: '50mb',
-    },
-  },
-}
-
 // Next.js App Router 用のサイズ上限設定
 export const maxDuration = 60
 
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID ?? '1Q4kJ1YBNRs3_ScblMpzxDHif60u79i9G3EoVb60pZaU'
 const SHEET_NAME = process.env.SHEET_NAME ?? '退会確認CSV'
 const SHEETS_API_BASE = 'https://sheets.googleapis.com/v4/spreadsheets'
+const CHUNK_SIZE = 1000 // 1000行ずつSheets APIに書き込む
+
+// --- CSV パーサー ---
+function parseCsvText(text: string): string[][] {
+  const lines = text.split(/\r?\n/).filter((line) => line.trim() !== '')
+  return lines.map((line) => {
+    const result: string[] = []
+    let current = ''
+    let inQuotes = false
+    for (let i = 0; i < line.length; i++) {
+      const char = line[i]
+      if (char === '"') {
+        if (inQuotes && line[i + 1] === '"') { current += '"'; i++ }
+        else inQuotes = !inQuotes
+      } else if (char === ',' && !inQuotes) {
+        result.push(current); current = ''
+      } else {
+        current += char
+      }
+    }
+    result.push(current)
+    return result
+  })
+}
 
 async function getAccessToken(): Promise<string> {
   const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL
@@ -94,38 +110,56 @@ async function clearSheet(accessToken: string): Promise<void> {
   }
 }
 
-async function writeSheet(accessToken: string, values: string[][]): Promise<number> {
-  const range = `${SHEET_NAME}!A1`
-  const url = `${SHEETS_API_BASE}/${SPREADSHEET_ID}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`
-  const res = await fetch(url, {
-    method: 'PUT',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ range, majorDimension: 'ROWS', values }),
-  })
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`シートへの書き込みに失敗しました: ${err}`)
+async function writeSheetChunked(accessToken: string, values: string[][]): Promise<number> {
+  // 最初のチャンクはA1から上書き（clearSheet後なので常にA1起点）
+  let startRow = 1
+  let totalUpdated = 0
+
+  for (let i = 0; i < values.length; i += CHUNK_SIZE) {
+    const chunk = values.slice(i, i + CHUNK_SIZE)
+    const range = `${SHEET_NAME}!A${startRow}`
+    const url = `${SHEETS_API_BASE}/${SPREADSHEET_ID}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`
+
+    const res = await fetch(url, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ range, majorDimension: 'ROWS', values: chunk }),
+    })
+
+    if (!res.ok) {
+      const err = await res.text()
+      throw new Error(`シートへの書き込みに失敗しました: ${err}`)
+    }
+
+    const data = await res.json()
+    totalUpdated += data.updatedRows ?? chunk.length
+    startRow += chunk.length
   }
-  const data = await res.json()
-  return data.updatedRows ?? values.length
+
+  return totalUpdated
 }
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json()
-    const { headers, rows } = body as { headers: string[]; rows: string[][] }
+    // Content-Type: text/csv で生テキストを受け取る
+    const csvText = await req.text()
 
-    if (!Array.isArray(headers) || !Array.isArray(rows)) {
-      return NextResponse.json({ error: 'リクエストデータが不正です' }, { status: 400 })
+    if (!csvText || csvText.trim() === '') {
+      return NextResponse.json({ error: 'CSVデータが空です' }, { status: 400 })
     }
 
-    const values = [headers, ...rows]
+    const values = parseCsvText(csvText)
+
+    if (values.length === 0) {
+      return NextResponse.json({ error: 'パース後のデータが空です' }, { status: 400 })
+    }
+
     const accessToken = await getAccessToken()
     await clearSheet(accessToken)
-    const updatedRows = await writeSheet(accessToken, values)
+    const updatedRows = await writeSheetChunked(accessToken, values)
 
     return NextResponse.json({
       success: true,

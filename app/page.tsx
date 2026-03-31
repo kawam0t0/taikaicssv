@@ -19,24 +19,45 @@ export default function Home() {
 
   const mergedData = useMergedCsv(files)
 
+  // 行データを500行ずつに分割してAPIを複数回叩く
+  const ROWS_PER_REQUEST = 500
+
   const handleSync = async () => {
     if (!mergedData) return
     setSyncStatus('loading')
     setSyncMessage(null)
 
     try {
-      const res = await fetch('/api/sync-sheets', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          headers: mergedData.headers,
-          rows: mergedData.rows,
-        }),
-      })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error ?? 'エラーが発生しました')
+      const allRows = [mergedData.headers, ...mergedData.rows]
+
+      // 1. まずシートをクリア
+      const clearRes = await fetch('/api/sync-sheets/clear', { method: 'POST' })
+      if (!clearRes.ok) {
+        const err = await clearRes.json()
+        throw new Error(err.error ?? 'シートのクリアに失敗しました')
+      }
+
+      // 2. 500行ずつチャンクに分割して順番に送信
+      let startRow = 1
+      let totalUpdated = 0
+      for (let i = 0; i < allRows.length; i += ROWS_PER_REQUEST) {
+        const chunk = allRows.slice(i, i + ROWS_PER_REQUEST)
+        const appendRes = await fetch('/api/sync-sheets/append', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ rows: chunk, startRow }),
+        })
+        if (!appendRes.ok) {
+          const err = await appendRes.json()
+          throw new Error(err.error ?? 'データの書き込みに失敗しました')
+        }
+        const data = await appendRes.json()
+        totalUpdated += data.updatedRows ?? chunk.length
+        startRow += chunk.length
+      }
+
       setSyncStatus('success')
-      setSyncMessage(data.message)
+      setSyncMessage(`${totalUpdated} 行をスプレッドシートに反映しました`)
     } catch (e) {
       setSyncStatus('error')
       setSyncMessage(e instanceof Error ? e.message : '予期しないエラーが発生しました')
